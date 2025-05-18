@@ -1,0 +1,172 @@
+name: Apply Kubernetes manifests
+
+on:
+  workflow_dispatch:
+
+jobs:
+  create-k8s-user-sa:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Получаем код
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GIT_WRITE_TOKEN }}
+
+      # Устанавливаем yq и jq для парсинга YAML/JSON
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          # yq v4
+          YQ_VERSION=v4.45.4
+          wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+          
+          # jq
+          apt-get update -qq && apt-get install -y -qq jq
+
+      - name: Install rsync and SSH client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y rsync openssh-client
+
+      - name: Set up SSH
+        env:
+          REMOTE_HOST: ${{ vars.K8S_HOST }}
+          REMOTE_PORT: ${{ vars.K8S_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          if [ -z $REMOTE_PORT ]; then
+            REMOTE_PORT="22"
+          fi
+          ssh-keyscan -H $REMOTE_HOST -p $REMOTE_PORT >> ~/.ssh/known_hosts
+
+      # Устанавливаем kubectl
+      - name: Install kubectl
+        run: |
+          # Download latest kubectl
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          mv kubectl /usr/local/bin/
+
+      # Создаем kubernetes манифесты
+      - name: Create Kubernetes manifest
+        env:
+          USER: ${{ vars.K8S_USER }}
+          NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+        run: |
+          set -euo pipefail
+          
+          NAMESPACE="${NAMESPACE:-$(yq eval '.metadata.name' namespace.yaml)}"
+          USER="${USER:-${NAMESPACE}}"
+          SA="${USER}-sa"
+          
+          # Проверка обязательных переменных
+          missing_vars=0
+          
+          check_var() {
+            local var_name="$1"
+            local var_value="$2"
+            local var_source="$3"
+          
+            if [ -z "$var_value" ]; then
+              echo "❌ Отсутствует обязательная переменная ${var_source}.${var_name}"
+              missing_vars=$((missing_vars + 1))
+            else
+              echo "✅ Переменная ${var_source}.${var_name} установлена"
+            fi
+          }
+          
+          # Проверка переменных окружения
+          check_var "K8S_USER" "$USER" "vars"
+          check_var "K8S_NAMESPACE" "$NAMESPACE" "vars"
+          
+          if [ $missing_vars -gt 0 ]; then
+            echo "❌ Найдено $missing_vars отсутствующих обязательных переменных. Завершение работы."
+            exit 1
+          fi
+          
+          echo "✅ Все обязательные переменные установлены. Продолжаем выполнение."
+          
+          NS_FILE="namespace.yaml"
+          echo "---" > "$NS_FILE"
+          echo "" >> "$NS_FILE"
+          
+          args=(create namespace "$NAMESPACE")
+          echo "kubectl ${args[@]}"
+          args+=(--dry-run=client -o yaml)
+          
+          kubectl "${args[@]}" \
+          | yq eval 'del(.metadata.creationTimestamp)' - \
+          >> "$NS_FILE"
+          
+          echo "" >> "$NS_FILE"
+          
+          OUT_FILE="${USER}-sa.yaml"
+          echo "---" > "$OUT_FILE"
+          echo "" >> "$OUT_FILE"
+          
+          args=(create serviceaccount "$SA" -n "$NAMESPACE")
+          echo "kubectl ${args[@]}"
+          args+=(--dry-run=client -o yaml)
+          
+          kubectl "${args[@]}" \
+          | yq eval 'del(.metadata.creationTimestamp)' - \
+          >> "$OUT_FILE"
+          
+          echo "" >> "$OUT_FILE"
+          echo "---" >> "$OUT_FILE"
+          echo "" >> "$OUT_FILE"
+          
+          args=(create rolebinding "$SA-edit" --clusterrole=edit --serviceaccount="$NAMESPACE:$SA" -n "$NAMESPACE")
+          echo "kubectl ${args[@]}"
+          args+=(--dry-run=client -o yaml)
+          
+          kubectl "${args[@]}" \
+          | yq eval 'del(.metadata.creationTimestamp)' - \
+          >> "$OUT_FILE"
+          
+          echo "" >> "$OUT_FILE"
+          echo "---" >> "$OUT_FILE"
+          echo "" >> "$OUT_FILE"
+          
+          args=(create secret generic "$SA-token" -n "$NAMESPACE" --type=kubernetes.io/service-account-token)
+          
+          echo "kubectl ${args[@]}"
+          args+=(--dry-run=client -o yaml)
+          
+          kubectl "${args[@]}" \
+          | yq eval ".metadata.annotations.\"kubernetes.io/service-account.name\" = \"$SA\"" - \
+          | yq eval 'del(.metadata.creationTimestamp)' - \
+          >> "$OUT_FILE"
+          
+          echo "" >> "$OUT_FILE"
+          
+          echo ""
+          echo "OUT_FILE: $OUT_FILE"
+          cat "$OUT_FILE"
+
+      # Конфигурируем автора коммита и фиксируем изменения, если они есть
+      - name: Commit changes if any
+        run: |
+          repo_url="$(jq -r '.repository' package.json || echo "")"
+          repo_url="${repo_url:-$(git config --get remote.origin.url)}"
+          repo_host="$(echo "$repo_url" | sed -E 's#^(.*://|.*@)?([^/:]+).*#\2#')"
+          
+          git config user.name "gitea-actions[bot]"
+          git config user.email "gitea-actions@$repo_host"
+          git add -A
+          # Проверяем, есть ли staged изменения; если да — коммитим
+          if ! git diff --cached --quiet; then
+            git commit -a -m "K8S User SA manifest"
+          else
+            echo "No changes to commit"
+          fi
+
+      # Пушим изменения обратно
+      - name: Push changes
+        run: git push

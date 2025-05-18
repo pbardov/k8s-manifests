@@ -1,0 +1,136 @@
+name: Apply Kubernetes manifests
+
+on:
+  workflow_dispatch:
+
+jobs:
+  config-k8s-user-kubectl:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Получаем код
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Устанавливаем yq и jq для парсинга YAML/JSON
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          # yq v4
+          YQ_VERSION=v4.45.4
+          wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+          
+          # jq
+          apt-get update -qq && apt-get install -y -qq jq
+
+      - name: Install rsync and SSH client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y rsync openssh-client
+
+      - name: Set up SSH
+        env:
+          REMOTE_HOST: ${{ vars.K8S_HOST }}
+          REMOTE_PORT: ${{ vars.K8S_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          if [ -z $REMOTE_PORT ]; then
+            REMOTE_PORT="22"
+          fi
+          ssh-keyscan -H $REMOTE_HOST -p $REMOTE_PORT >> ~/.ssh/known_hosts
+
+      # Устанавливаем kubectl
+      - name: Install kubectl
+        run: |
+          # Download latest kubectl
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          mv kubectl /usr/local/bin/
+
+      # Конфигурируем kubectl
+      - name: Configure kubectl
+        env:
+          REMOTE_USER: ${{ vars.K8S_USER }}
+          REMOTE_HOST: ${{ vars.K8S_HOST }}
+          REMOTE_PORT: ${{ vars.K8S_PORT }}
+          NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+          API_SERVER: ${{ vars.K8S_API_SERVER }}
+          CLUSTER: ${{ vars.K8S_CLUSTER }}
+          CLUSTER_CA: ${{ vars.K8S_CLUSTER_CA }}
+          TOKEN: ${{ secrets.K8S_TOKEN }}
+        run: |
+          set -euo pipefail
+          
+          REMOTE_PORT="${REMOTE_PORT:-"22"}"
+          CLUSTER="${CLUSTER:-"k8s"}"
+          NAMESPACE="${NAMESPACE:-$(yq eval '.metadata.name' namespace.yaml)}"
+          USER="${REMOTE_USER:-${NAMESPACE}}"
+          SA="${USER}-sa"
+          CTX="${SA}-context"
+          
+          K8S_WD="$(ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST "pwd")"
+          KUBE_CFG_DIR="$K8S_WD/.kube"
+          CA_FILE="$KUBE_CFG_DIR/cluster-ca.crt"
+          
+          # Проверка обязательных переменных
+          missing_vars=0
+          
+          check_var() {
+            local var_name="$1"
+            local var_value="$2"
+            local var_source="$3"
+            
+            if [ -z "$var_value" ]; then
+              echo "❌ Отсутствует обязательная переменная ${var_source}.${var_name}"
+              missing_vars=$((missing_vars + 1))
+            else
+              echo "✅ Переменная ${var_source}.${var_name} установлена"
+            fi
+          }
+        
+          # Проверка переменных окружения
+          check_var "K8S_HOST" "$REMOTE_HOST" "vars"
+          check_var "K8S_USER" "$REMOTE_USER" "vars"
+          check_var "K8S_API_SERVER" "$API_SERVER" "vars"
+          check_var "K8S_CLUSTER" "$CLUSTER" "vars"
+          check_var "K8S_CLUSTER_CA" "$CLUSTER_CA" "vars"
+          check_var "K8S_NAMESPACE" "$NAMESPACE" "vars"
+          check_var "K8S_TOKEN" "$TOKEN" "secrets"
+          
+          if [ $missing_vars -gt 0 ]; then
+            echo "❌ Найдено $missing_vars отсутствующих обязательных переменных. Завершение работы."
+            exit 1
+          fi
+          
+          echo "✅ Все обязательные переменные установлены. Продолжаем выполнение."
+          
+  
+          ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST "mkdir -p '$KUBE_CFG_DIR' \
+          && chmod 700 '$KUBE_CFG_DIR'"
+          
+          echo "$CLUSTER_CA" | ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST "tee '$CA_FILE'"
+          
+          args=(config set-cluster "$CLUSTER" \
+          --server="$API_SERVER" \
+          --certificate-authority="$CA_FILE")
+          echo "kubectl ${args[@]}"
+          ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST "kubectl ${args[@]}"
+          
+          args=(config set-credentials "$SA" --token="$TOKEN")
+          echo "kubectl ${args[@]}"
+          ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST "kubectl ${args[@]}"
+
+          args=(config set-context "$CTX" \
+          --cluster="$CLUSTER" \
+          --namespace="$NAMESPACE" \
+          --user="$SA")
+          echo "kubectl ${args[@]}"
+          ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST "kubectl ${args[@]}"
+
+          args=(config use-context "$CTX")
+          echo "kubectl ${args[@]}"
+          ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST "kubectl ${args[@]}"

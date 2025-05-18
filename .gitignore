@@ -1,0 +1,5 @@
+.idea
+.synck8s.json
+.secrets.json
+.configmaps.json
+sync-job.json
