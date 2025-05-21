@@ -29,7 +29,23 @@
 **Требуемые secrets**:
 - `SSH_PRIVATE_KEY` - SSH-ключ для доступа к удаленному серверу
 
-### 3. create-k8s-user-sa - Создание сервисного аккаунта в K8s
+### 3. delete-manifests - Удаление K8s манифестов
+**Файл**: `delete-manifests.yaml`
+**Описание**: Удаляет Kubernetes манифесты из кластера, исключая файлы namespace.yaml и *-sa.yaml.
+**Триггеры**:
+- Вручную через UI (workflow_dispatch)
+
+**Требуемые vars**:
+- `K8S_HOST` - хост сервера с доступом к Kubernetes
+- `K8S_PORT` - SSH порт сервера (по умолчанию 22)
+- `K8S_USER` - пользователь SSH
+- `K8S_NAMESPACE` - Kubernetes namespace (или извлекается из namespace.yaml)
+
+**Требуемые secrets**:
+- `SSH_PRIVATE_KEY` - SSH-ключ для доступа к удаленному серверу
+
+
+### 4. create-k8s-user-sa - Создание сервисного аккаунта в K8s
 **Файл**: `.gitea/workflows/create-k8s-user-sa.yaml`
 **Описание**: Создает YAML-манифесты для namespace и сервисного аккаунта с ролью edit.
 **Триггеры**:
@@ -45,7 +61,7 @@
 - `SSH_PRIVATE_KEY` - SSH-ключ для доступа к удаленному серверу
 - `GIT_WRITE_TOKEN` - токен для записи изменений в репозиторий
 
-### 4. config-k8s-user-kubectl - Настройка kubectl для пользователя
+### 5. config-k8s-user-kubectl - Настройка kubectl для пользователя
 **Файл**: `.gitea/workflows/config-k8s-user-kubectl.yaml`
 **Описание**: Настраивает kubectl на удаленном сервере для использования сервисного аккаунта.
 **Триггеры**:
@@ -64,7 +80,7 @@
 - `SSH_PRIVATE_KEY` - SSH-ключ для доступа к удаленному серверу
 - `K8S_TOKEN` - токен сервисного аккаунта Kubernetes
 
-### 5. sync-k8s-cm-secrets - Синхронизация ConfigMaps и Secrets
+### 6. sync-k8s-cm-secrets - Синхронизация ConfigMaps и Secrets
 **Файл**: `.gitea/workflows/sync-k8s-cm-secrets.yaml`
 **Описание**: Синхронизирует конфигурационные карты и секреты из файлов `.configmaps.yaml` и `.secrets.yaml` в кластер Kubernetes.
 **Триггеры**:
@@ -85,7 +101,7 @@
 - `.secrets.yaml` - определения Secrets для создания в кластере
 - `.synck8s.yaml` - дополнительные настройки синхронизации
 
-### 6. sync-imagepull-secrets - Настройка доступа к Docker Registry
+### 7. sync-imagepull-secrets - Настройка доступа к Docker Registry
 **Файл**: `.gitea/workflows/sync-imagepull-secrets.yaml`
 **Описание**: Создает secret типа docker-registry и привязывает его к сервисному аккаунту default.
 **Триггеры**:
