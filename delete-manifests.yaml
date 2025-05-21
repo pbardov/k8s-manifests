@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  apply-manifests:
+  delete-manifests:
     runs-on: ubuntu-latest
 
     steps:
@@ -31,7 +31,7 @@ jobs:
           ssh-keyscan -H $REMOTE_HOST -p $REMOTE_PORT >> ~/.ssh/known_hosts
 
       # Применяем манифесты kubernetes
-      - name: Apply Kubernetes manifests
+      - name: Delete (kubectl delete -f) Kubernetes manifests
         env:
           REMOTE_USER: ${{ vars.K8S_USER }}
           REMOTE_HOST: ${{ vars.K8S_HOST }}
@@ -80,5 +80,5 @@ jobs:
           # Итерируемся по каждому объекту
           find . -maxdepth 1 -type f -name '*.yaml' ! -name '.*' -printf '%f\n' | grep -Exv -f .notapply | while read -r file; do
             echo "🔐 Processing: $file"
-            cat "$file" | ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST "kubectl apply -f - "
+            cat "$file" | ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST "kubectl delete -f - "
           done
